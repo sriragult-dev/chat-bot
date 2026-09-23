@@ -1,0 +1,212 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DataMentor</title>
+<style>
+  :root {
+    --bg: #f6f7f9;
+    --panel: #ffffff;
+    --border: #e2e5ea;
+    --text: #1b1f24;
+    --muted: #6b7280;
+    --accent: #3b5bdb;
+    --user-bg: #3b5bdb;
+    --user-text: #ffffff;
+    --bot-bg: #f1f3f5;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #14161a;
+      --panel: #1c1f24;
+      --border: #2c3138;
+      --text: #e6e8eb;
+      --muted: #9aa2ad;
+      --accent: #5c7cfa;
+      --user-bg: #4263eb;
+      --user-text: #ffffff;
+      --bot-bg: #23272e;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; height: 100vh; display: flex; flex-direction: column;
+    background: var(--bg); color: var(--text);
+    font: 15px/1.6 -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  header {
+    display: flex; align-items: center; gap: 12px;
+    padding: 14px 20px; background: var(--panel);
+    border-bottom: 1px solid var(--border);
+  }
+  header h1 { font-size: 16px; margin: 0; }
+  header .sub { font-size: 13px; color: var(--muted); flex: 1; }
+  button {
+    font: inherit; font-size: 14px; cursor: pointer; border-radius: 8px;
+    border: 1px solid var(--border); background: var(--panel); color: var(--text);
+    padding: 8px 14px;
+  }
+  button:hover { border-color: var(--accent); }
+  button:disabled { opacity: .5; cursor: default; }
+  #log { flex: 1; overflow-y: auto; padding: 20px; }
+  .wrap { max-width: 760px; margin: 0 auto; }
+  .msg { display: flex; margin-bottom: 14px; }
+  .msg.user { justify-content: flex-end; }
+  .bubble {
+    max-width: 80%; padding: 10px 14px; border-radius: 14px;
+    white-space: pre-wrap; word-wrap: break-word;
+  }
+  .user .bubble { background: var(--user-bg); color: var(--user-text); border-bottom-right-radius: 4px; }
+  .bot .bubble { background: var(--bot-bg); border-bottom-left-radius: 4px; }
+  .bot.error .bubble { background: #fdecea; color: #a12d2d; }
+  .hint { color: var(--muted); text-align: center; margin-top: 40px; }
+  .hint code { background: var(--bot-bg); padding: 2px 6px; border-radius: 4px; }
+  footer { border-top: 1px solid var(--border); background: var(--panel); padding: 14px 20px; }
+  form { display: flex; gap: 10px; max-width: 760px; margin: 0 auto; }
+  textarea {
+    flex: 1; resize: none; font: inherit; color: var(--text);
+    background: var(--bg); border: 1px solid var(--border);
+    border-radius: 8px; padding: 10px 12px; max-height: 140px;
+  }
+  textarea:focus { outline: none; border-color: var(--accent); }
+</style>
+</head>
+<body>
+  <header>
+    <h1>DataMentor</h1>
+    <span class="sub">Data science &amp; startup guidance</span>
+    <button id="reset" type="button">New chat</button>
+  </header>
+
+  <div id="log">
+    <div class="wrap">
+      <p class="hint">
+        Ask about models, metrics, experiments, data stacks &mdash; or what your
+        startup should measure first.<br>
+        API docs at <code>/docs</code>
+      </p>
+    </div>
+  </div>
+
+  <footer>
+    <form id="form">
+      <textarea id="input" rows="1" placeholder="Ask a data science or startup question&hellip;" autofocus></textarea>
+      <button id="send" type="submit">Send</button>
+    </form>
+  </footer>
+
+<script>
+const log = document.getElementById('log');
+const wrap = log.querySelector('.wrap');
+const form = document.getElementById('form');
+const input = document.getElementById('input');
+const sendBtn = document.getElementById('send');
+const resetBtn = document.getElementById('reset');
+
+const KEY = 'datamentor_session_id';
+let sessionId = localStorage.getItem(KEY) || null;
+
+function addBubble(role, text, isError) {
+  const hint = wrap.querySelector('.hint');
+  if (hint) hint.remove();
+  const msg = document.createElement('div');
+  msg.className = 'msg ' + role + (isError ? ' error' : '');
+  const bubble = document.createElement('div');
+  bubble.className = 'bubble';
+  bubble.textContent = text;
+  msg.appendChild(bubble);
+  wrap.appendChild(msg);
+  log.scrollTop = log.scrollHeight;
+  return bubble;
+}
+
+// Grow the textarea with its content, and send on Enter (Shift+Enter for newline).
+input.addEventListener('input', () => {
+  input.style.height = 'auto';
+  input.style.height = Math.min(input.scrollHeight, 140) + 'px';
+});
+input.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); form.requestSubmit(); }
+});
+
+resetBtn.addEventListener('click', async () => {
+  if (sessionId) {
+    try { await fetch('/session/' + encodeURIComponent(sessionId), { method: 'DELETE' }); }
+    catch (_) { /* clearing locally is enough */ }
+  }
+  sessionId = null;
+  localStorage.removeItem(KEY);
+  wrap.innerHTML = '<p class="hint">New conversation started. Previous context cleared.</p>';
+  input.focus();
+});
+
+form.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const message = input.value.trim();
+  if (!message) return;
+
+  addBubble('user', message);
+  input.value = '';
+  input.style.height = 'auto';
+  sendBtn.disabled = true;
+
+  const bubble = addBubble('bot', '');
+  bubble.textContent = '\u2026';
+  let streamed = '';
+
+  try {
+    const res = await fetch('/chat/stream', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ message, session_id: sessionId })
+    });
+    if (!res.ok) throw new Error('HTTP ' + res.status + ': ' + (await res.text()));
+
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+
+      // SSE frames are separated by a blank line.
+      const frames = buffer.split('\n\n');
+      buffer = frames.pop();
+
+      for (const frame of frames) {
+        const line = frame.split('\n').find(l => l.startsWith('data: '));
+        if (!line) continue;
+        const payload = line.slice(6);
+        if (payload === '[DONE]') continue;
+
+        const data = JSON.parse(payload);
+        if (data.session_id && !sessionId) {
+          sessionId = data.session_id;
+          localStorage.setItem(KEY, sessionId);
+        }
+        if (data.error) {
+          bubble.parentElement.classList.add('error');
+          bubble.textContent = data.error;
+          streamed = data.error;
+          continue;
+        }
+        streamed += data.delta;
+        bubble.textContent = streamed;
+        log.scrollTop = log.scrollHeight;
+      }
+    }
+    if (!streamed) bubble.textContent = '(empty response)';
+  } catch (err) {
+    bubble.parentElement.classList.add('error');
+    bubble.textContent = 'Request failed: ' + err.message;
+  } finally {
+    sendBtn.disabled = false;
+    input.focus();
+  }
+});
+</script>
+</body>
+</html>
